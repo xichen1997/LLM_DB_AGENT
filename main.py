@@ -1,4 +1,7 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import create_engine, inspect
 import pandas as pd
@@ -7,30 +10,75 @@ import json
 from typing import Optional, Dict, Any
 from openai import OpenAI
 from datetime import datetime
-from jinja2 import Template
-from pathlib import Path
 import os
-from dotenv import load_dotenv
+import base64
+import io
+from fastapi.middleware.cors import CORSMiddleware
+import logging
+from logging.handlers import RotatingFileHandler
+import traceback
 
-load_dotenv()  # Add this near the top of your file
+# Set up logging configuration
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Create logs directory if it doesn't exist
+os.makedirs('logs', exist_ok=True)
+
+# Add file handler for logging
+file_handler = RotatingFileHandler(
+    'logs/app.log',
+    maxBytes=1024 * 1024,  # 1MB
+    backupCount=5
+)
+file_handler.setFormatter(
+    logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+)
+logger.addHandler(file_handler)
+
+# Create directories for templates and static files
+os.makedirs('templates', exist_ok=True)
+os.makedirs('static', exist_ok=True)
+
+app = FastAPI()
+# Mount static files directory
+app.mount("/static", StaticFiles(directory="static"), name="static")
+# Setup templates
+templates = Jinja2Templates(directory="templates")
+
+# Add CORS middleware to allow all origins
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class QueryRequest(BaseModel):
     query: str
     db_connection: str
+    api_key: str
 
 class AIDBAgent:
-    def __init__(self):
-        # Get API key from environment variable
-        openai_api_key = os.getenv('OPENAI_API_KEY')
-        if not openai_api_key:
-            raise ValueError("OPENAI_API_KEY environment variable is not set")
-        self.client = OpenAI(api_key=openai_api_key)
-        self.engine = None
-        self.db_schema = None
+    def __init__(self, openai_api_key: str):
+        logger.info("Initializing AIDBAgent")
+        try:
+            self.client = OpenAI(
+                api_key=openai_api_key,
+                base_url="https://api.openai.com/v1"
+            )
+            self.engine = None
+            self.db_schema = None
+        except Exception as e:
+            logger.error(f"Error initializing AIDBAgent: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
 
     def connect_to_db(self, connection_string: str):
         """Connect to database and extract schema information"""
         try:
+            logger.info(f"Connecting to database: {connection_string}")
             self.engine = create_engine(connection_string)
             inspector = inspect(self.engine)
             
@@ -42,37 +90,47 @@ class AIDBAgent:
                     'columns': [{'name': col['name'], 'type': str(col['type'])} 
                               for col in columns]
                 }
+            logger.info("Database connection and schema extraction successful")
             return True
         except Exception as e:
+            logger.error(f"Database connection error: {str(e)}")
+            logger.error(traceback.format_exc())
             raise HTTPException(status_code=500, detail=f"Database connection error: {str(e)}")
 
     def generate_sql_query(self, natural_query: str) -> str:
         """Convert natural language to SQL using OpenAI"""
         try:
+            logger.info(f"Generating SQL query for: {natural_query}")
             prompt = f"""
             Given the following database schema:
             {json.dumps(self.db_schema, indent=2)}
             
-            Convert this natural language query to SQL:
+            Convert this natural language query to SQL using SQLite syntax:
             "{natural_query}"
             
-            Return only the raw SQL query without any markdown formatting, explanation, or backticks.
+            Important notes:
+            - Use SQLite date functions (strftime, date, etc.)
+            - For "last month", use: "WHERE sale_date >= date('now', 'start of month', '-1 month') AND sale_date < date('now', 'start of month')"
+            - For date calculations, use SQLite's date() and strftime() functions
+            - Return only the raw SQL query without any formatting
             """
             
             response = self.client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
-                    {"role": "system", "content": "You are a SQL query generator. Return only raw SQL without any markdown formatting or backticks."},
+                    {"role": "system", "content": "You are a SQL query generator for SQLite. Use SQLite-specific date functions and syntax."},
                     {"role": "user", "content": prompt}
                 ]
             )
             
-            # Clean up the response by removing any markdown SQL formatting
             sql_query = response.choices[0].message.content.strip()
             sql_query = sql_query.replace('```sql', '').replace('```', '').strip()
             
+            logger.info(f"Generated SQL query: {sql_query}")
             return sql_query
         except Exception as e:
+            logger.error(f"Query generation error: {str(e)}")
+            logger.error(traceback.format_exc())
             raise HTTPException(status_code=500, detail=f"Query generation error: {str(e)}")
 
     def execute_query(self, sql_query: str) -> pd.DataFrame:
@@ -85,71 +143,158 @@ class AIDBAgent:
     def generate_visualization(self, df: pd.DataFrame, query: str) -> Dict[str, Any]:
         """Generate appropriate visualization based on data"""
         try:
+            logger.info(f"Generating visualization for dataframe with columns: {df.columns.tolist()}")
             prompt = f"""
             Given this data summary:
             Columns: {df.columns.tolist()}
             Data types: {df.dtypes.to_dict()}
+            Number of rows: {len(df)}
             Query: "{query}"
             
-            Suggest the best visualization type (pie, bar, line, scatter, or table) and explain why.
-            Return in JSON format with keys: 'type', 'x_column', 'y_column' (if applicable), 'reason'
+            Return a JSON object with the following structure for visualization:
+            {{
+                "type": "value" | "line" | "bar" | "scatter" | "pie" | "table",
+                "reason": "explanation for choosing this visualization",
+                "value_column": "column_name",  // for 'value' type only
+                "values": "column_name",        // for pie chart values
+                "names": "column_name",         // for pie chart categories
+                "x_column": "column_name",      // for line/bar/scatter plots
+                "y_column": "column_name",      // for line/bar/scatter plots
+                "title": "chart title"          // optional, for all chart types
+            }}
+
+            Choose visualization type based on these rules:
+            1. For single aggregated values: use 'value' type
+            2. For time series data: use 'line' type with sale_date as x_column
+            3. For categorical comparisons: use 'bar' type
+            4. For distributions: use 'scatter' type
+            5. For parts of a whole: use 'pie' type
+            6. For detailed data or if unsure: use 'table' type
+
+            Return ONLY the JSON object, no additional text.
             """
             
             response = self.client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
-                    {"role": "system", "content": "You are a data visualization expert."},
+                    {
+                        "role": "system", 
+                        "content": "You are a data visualization expert. Always return valid JSON objects."
+                    },
                     {"role": "user", "content": prompt}
                 ]
             )
             
-            viz_suggestion = json.loads(response.choices[0].message.content)
+            # Get the response content and try to parse it
+            content = response.choices[0].message.content.strip()
+            logger.info(f"Raw visualization suggestion: {content}")
             
-            # Create visualization
+            try:
+                viz_suggestion = json.loads(content)
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse JSON: {content}")
+                # Fallback to table visualization if JSON parsing fails
+                return {
+                    'type': 'table',
+                    'data': df.to_dict('records'),
+                    'columns': df.columns.tolist(),
+                    'reason': 'Fallback to table view due to visualization parsing error'
+                }
+            
+            logger.info(f"Parsed visualization suggestion: {viz_suggestion}")
+            
+            # Update the visualization creation part
             if viz_suggestion['type'] == 'table':
                 return {
                     'type': 'table',
                     'data': df.to_dict('records'),
-                    'columns': df.columns.tolist()
+                    'columns': df.columns.tolist(),
+                    'reason': viz_suggestion.get('reason', 'Showing detailed data')
                 }
-            
-            # Create Plotly figure with improved formatting
-            if viz_suggestion['type'] == 'bar':
-                fig = px.bar(df, 
-                    x=viz_suggestion['x_column'], 
-                    y=viz_suggestion['y_column'],
-                    title='Product Revenue Comparison',
-                    labels={
-                        viz_suggestion['x_column']: 'Product',
-                        viz_suggestion['y_column']: 'Revenue ($)'
-                    },
-                    color_discrete_sequence=['#2c3e50'])
-                
-                # Update layout for better formatting
-                fig.update_layout(
-                    yaxis_tickformat='$,.2f',
-                    hovermode='x',
-                    plot_bgcolor='white',
-                    paper_bgcolor='white'
-                )
-                
-                # Update hover template
-                fig.update_traces(
-                    hovertemplate="Product: %{x}<br>Revenue: $%{y:,.2f}<extra></extra>"
-                )
+            elif viz_suggestion['type'] == 'value':
+                value_column = viz_suggestion.get('value_column', df.columns[0])
+                return {
+                    'type': 'value',
+                    'data': float(df[value_column].iloc[0]) if len(df) > 0 else 0,
+                    'label': value_column
+                }
+            else:
+                try:
+                    # Common parameters for all plot types
+                    plot_params = {
+                        'title': viz_suggestion.get('title', 'Data Visualization')
+                    }
 
-            # Similar improvements for other chart types...
-            
-            return {
-                'type': viz_suggestion['type'],
-                'plot': fig.to_json(),
-                'reason': viz_suggestion['reason'],
-                'data': df.to_dict('records'),  # Add raw data for table view
-                'columns': df.columns.tolist()
-            }
-            
+                    if viz_suggestion['type'] == 'pie':
+                        values_col = viz_suggestion.get('values', viz_suggestion.get('y_column'))
+                        names_col = viz_suggestion.get('names', viz_suggestion.get('x_column'))
+                        
+                        if not values_col or not names_col or values_col not in df.columns or names_col not in df.columns:
+                            raise KeyError("Missing or invalid columns for pie chart")
+                        
+                        # Aggregate data for pie chart
+                        df_agg = df.groupby(names_col)[values_col].sum().reset_index()
+                        fig = px.pie(df_agg, values=values_col, names=names_col, title=plot_params['title'])
+                        fig.update_traces(textposition='inside', textinfo='percent+label')
+                        
+                    elif viz_suggestion['type'] in ['bar', 'line', 'scatter']:
+                        x_col = viz_suggestion.get('x_column')
+                        y_col = viz_suggestion.get('y_column')
+                        
+                        if not x_col or not y_col or x_col not in df.columns or y_col not in df.columns:
+                            raise KeyError(f"Missing or invalid columns for {viz_suggestion['type']} chart")
+                        
+                        # Create appropriate plot
+                        if viz_suggestion['type'] == 'bar':
+                            fig = px.bar(df, x=x_col, y=y_col, title=plot_params['title'])
+                        elif viz_suggestion['type'] == 'line':
+                            fig = px.line(df, x=x_col, y=y_col, title=plot_params['title'])
+                        else:  # scatter
+                            fig = px.scatter(df, x=x_col, y=y_col, title=plot_params['title'])
+                        
+                        # Update layout
+                        fig.update_layout(
+                            xaxis_title=x_col,
+                            yaxis_title=y_col,
+                            showlegend=True
+                        )
+                    else:
+                        # Fallback to table for unknown visualization type
+                        logger.warning(f"Unknown visualization type: {viz_suggestion['type']}")
+                        return {
+                            'type': 'table',
+                            'data': df.to_dict('records'),
+                            'columns': df.columns.tolist(),
+                            'reason': 'Fallback to table view due to unknown visualization type'
+                        }
+
+                    return {
+                        'type': viz_suggestion['type'],
+                        'plot': fig.to_json(),
+                        'reason': viz_suggestion.get('reason', 'Data visualization')
+                    }
+
+                except Exception as e:
+                    logger.error(f"Error creating visualization: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    # Fallback to table view
+                    return {
+                        'type': 'table',
+                        'data': df.to_dict('records'),
+                        'columns': df.columns.tolist(),
+                        'reason': f'Fallback to table view due to error: {str(e)}'
+                    }
+
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Visualization error: {str(e)}")
+            logger.error(f"Visualization error: {str(e)}")
+            logger.error(traceback.format_exc())
+            # Final fallback to table visualization
+            return {
+                'type': 'table',
+                'data': df.to_dict('records'),
+                'columns': df.columns.tolist(),
+                'reason': 'Fallback to table view due to error'
+            }
 
     def generate_summary(self, df: pd.DataFrame, query: str) -> str:
         """Generate natural language summary of the results"""
@@ -176,245 +321,102 @@ class AIDBAgent:
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Summary generation error: {str(e)}")
 
-    def generate_report(self, query: str, sql_query: str, visualization: Dict[str, Any], summary: str) -> str:
-        """Generate an HTML report with the query results"""
+    def save_report(self, query: str, sql_query: str, df: pd.DataFrame, visualization: Dict[str, Any], summary: str) -> str:
+        """Save the report as a file"""
         try:
-            # Create reports directory if it doesn't exist
-            reports_dir = Path("reports")
-            reports_dir.mkdir(exist_ok=True)
-
-            # Create a timestamp for the report filename
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            report_filename = f"report_{timestamp}.html"
+            # Create a unique filename
+            filename = f"report_{datetime.now().strftime('%Y%m%d%H%M%S')}.html"
             
-            # Improved HTML template with better styling and structure
-            template_str = """
-            <!DOCTYPE html>
+            # Create the HTML template
+            template = """
             <html>
             <head>
-                <meta charset="UTF-8">
-                <title>Database Query Report</title>
-                <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
-                <style>
-                    body { 
-                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif; 
-                        margin: 40px;
-                        line-height: 1.6;
-                        color: #333;
-                        background-color: #f5f7fa;
-                    }
-                    .container { 
-                        max-width: 1200px; 
-                        margin: 0 auto;
-                        padding: 20px;
-                    }
-                    .section { 
-                        margin-bottom: 40px;
-                        background: white;
-                        padding: 25px;
-                        border-radius: 8px;
-                        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                    }
-                    .query-box { 
-                        background-color: #f8f9fa;
-                        padding: 20px;
-                        border-radius: 6px;
-                        border: 1px solid #e9ecef;
-                    }
-                    .timestamp {
-                        color: #666;
-                        font-size: 0.9em;
-                        margin-top: -20px;
-                        margin-bottom: 30px;
-                    }
-                    table { 
-                        border-collapse: collapse; 
-                        width: 100%;
-                        margin: 20px 0;
-                        background: white;
-                    }
-                    th, td { 
-                        border: 1px solid #dee2e6;
-                        padding: 12px;
-                        text-align: left;
-                    }
-                    th { 
-                        background-color: #f8f9fa;
-                        font-weight: 600;
-                    }
-                    h1, h2 { 
-                        color: #2c3e50; 
-                        margin-top: 0;
-                    }
-                    pre {
-                        white-space: pre-wrap;
-                        word-wrap: break-word;
-                        background-color: #f8f9fa;
-                        padding: 15px;
-                        border-radius: 4px;
-                        border: 1px solid #e9ecef;
-                        font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace;
-                        font-size: 14px;
-                    }
-                    .plot-container {
-                        margin: 20px 0;
-                        background: white;
-                        padding: 20px;
-                        border-radius: 8px;
-                        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-                    }
-                    .visualization-note {
-                        margin-top: 20px;
-                        padding: 15px;
-                        background-color: #f8f9fa;
-                        border-radius: 6px;
-                        border-left: 4px solid #2c3e50;
-                    }
-                    .data-table {
-                        margin-top: 30px;
-                        border: 1px solid #e9ecef;
-                        border-radius: 8px;
-                        overflow: hidden;
-                    }
-                    .data-table h3 {
-                        margin: 0;
-                        padding: 15px 20px;
-                        background: #f8f9fa;
-                        border-bottom: 1px solid #e9ecef;
-                    }
-                    .table-container {
-                        padding: 20px;
-                        overflow-x: auto;
-                    }
-                </style>
+                <title>Query Report</title>
             </head>
             <body>
-                <div class="container">
-                    <h1>Database Query Report</h1>
-                    <div class="timestamp">Generated on: {{ timestamp }}</div>
-                    
-                    <div class="section">
-                        <h2>Query</h2>
-                        <div class="query-box">
-                            <p><strong>Natural Language Query:</strong> {{ natural_query }}</p>
-                            <p><strong>SQL Query:</strong><br>
-                            <pre>{{ sql_query }}</pre></p>
-                        </div>
-                    </div>
-
-                    <div class="section">
-                        <h2>Summary</h2>
-                        <p>{{ summary }}</p>
-                    </div>
-
-                    <div class="section">
-                        <h2>Visualization</h2>
-                        {% if visualization.type != 'table' %}
-                            <div id="plot" class="plot-container"></div>
-                            <div class="visualization-note">
-                                <strong>Visualization Choice:</strong> {{ visualization.reason }}
-                            </div>
-                            <script>
-                                var plotData = {{ visualization.plot | safe }};
-                                Plotly.newPlot('plot', plotData.data, plotData.layout);
-                            </script>
-                            
-                            <div class="data-table">
-                                <h3>Raw Data</h3>
-                                <div class="table-container">
-                                    <table>
-                                        <thead>
-                                            <tr>
-                                            {% for column in visualization.columns %}
-                                                <th>{{ column | title }}</th>
-                                            {% endfor %}
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {% for row in visualization.data %}
-                                            <tr>
-                                                {% for column in visualization.columns %}
-                                                <td>{{ row[column] }}</td>
-                                                {% endfor %}
-                                            </tr>
-                                            {% endfor %}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        {% else %}
-                            <table>
-                                <thead>
-                                    <tr>
-                                    {% for column in visualization.columns %}
-                                        <th>{{ column }}</th>
-                                    {% endfor %}
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {% for row in visualization.data %}
-                                    <tr>
-                                        {% for column in visualization.columns %}
-                                        <td>{{ row[column] }}</td>
-                                        {% endfor %}
-                                    </tr>
-                                    {% endfor %}
-                                </tbody>
-                            </table>
-                        {% endif %}
-                    </div>
-                </div>
+                <h1>Query Report</h1>
+                <h2>Query: {{ query }}</h2>
+                <h3>SQL Query: {{ sql_query }}</h3>
+                <h3>Visualization: {{ visualization['type'] }}</h3>
+                <h3>Summary: {{ summary }}</h3>
+                <h3>Data: {{ df.to_html() }}</h3>
             </body>
             </html>
             """
             
-            # Render the template with current timestamp
-            template = Template(template_str)
-            html_content = template.render(
-                natural_query=query,
+            # Render the template
+            rendered_template = template.format(
+                query=query,
                 sql_query=sql_query,
-                summary=summary,
                 visualization=visualization,
-                timestamp=datetime.now().strftime("%B %d, %Y %H:%M:%S")
+                summary=summary,
+                df=df.to_html()
             )
             
-            # Save the report
-            report_path = reports_dir / report_filename
-            with open(report_path, 'w', encoding='utf-8') as f:
-                f.write(html_content.strip())  # Remove leading/trailing whitespace
-                
-            return str(report_path)
+            # Save the rendered template to a file
+            with open(filename, 'w') as f:
+                f.write(rendered_template)
             
+            return filename
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Report generation error: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Report saving error: {str(e)}")
 
-app = FastAPI()
-try:
-    ai_agent = AIDBAgent()
-except ValueError as e:
-    print(f"Error initializing AIDBAgent: {e}")
-    print("Please set the OPENAI_API_KEY environment variable")
-    raise
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request):
+    return templates.TemplateResponse(
+        "index.html", 
+        {"request": request}
+    )
 
 @app.post("/query")
 async def process_query(request: QueryRequest):
-    # Connect to database
-    ai_agent.connect_to_db(request.db_connection)
-    
-    # Generate and execute SQL query
-    sql_query = ai_agent.generate_sql_query(request.query)
-    results_df = ai_agent.execute_query(sql_query)
-    
-    # Generate visualization and summary
-    visualization = ai_agent.generate_visualization(results_df, request.query)
-    summary = ai_agent.generate_summary(results_df, request.query)
-    
-    # Generate report
-    report_path = ai_agent.generate_report(request.query, sql_query, visualization, summary)
-    
-    return {
-        "report_path": report_path,
-        "sql_query": sql_query,
-        # "visualization": visualization,
-        "summary": summary
-    }
+    logger.info(f"Received query request: {request.query}")
+    try:
+        # Get API key from request
+        api_key = request.api_key
+        ai_agent = AIDBAgent(api_key)
+        
+        # Connect to database
+        logger.info("Connecting to database...")
+        ai_agent.connect_to_db(request.db_connection)
+        
+        # Generate and execute SQL query
+        logger.info("Generating SQL query...")
+        sql_query = ai_agent.generate_sql_query(request.query)
+        logger.info("Executing SQL query...")
+        results_df = ai_agent.execute_query(sql_query)
+        
+        # Generate visualization and summary
+        logger.info("Generating visualization...")
+        visualization = ai_agent.generate_visualization(results_df, request.query)
+        logger.info("Generating summary...")
+        summary = ai_agent.generate_summary(results_df, request.query)
+        
+        # Save report
+        logger.info("Saving report...")
+        report_path = ai_agent.save_report(
+            query=request.query,
+            sql_query=sql_query,
+            df=results_df,
+            visualization=visualization,
+            summary=summary
+        )
+        
+        logger.info("Request processed successfully")
+        return JSONResponse(content={
+            "sql_query": sql_query,
+            "visualization": visualization,
+            "summary": summary,
+            "report_path": report_path
+        })
+        
+    except Exception as e:
+        logger.error(f"Error processing query: {str(e)}")
+        logger.error(traceback.format_exc())
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": str(e),
+                "details": traceback.format_exc()
+            }
+        )

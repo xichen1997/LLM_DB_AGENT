@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Database Query Interface</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        .result-section {
+            margin-top: 20px;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            display: none;
+        }
+        #loading {
+            display: none;
+            text-align: center;
+            margin: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-5">
+        <h1 class="mb-4">AI Database Query Interface</h1>
+        
+        <div class="card mb-4">
+            <div class="card-header">
+                API Configuration
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label for="apiKey" class="form-label">OpenAI API Key</label>
+                    <div class="input-group">
+                        <input type="password" class="form-control" id="apiKey" 
+                            placeholder="Enter your OpenAI API key"
+                            required>
+                        <button class="btn btn-outline-secondary" type="button" id="toggleApiKey">
+                            <i class="bi bi-eye"></i>
+                        </button>
+                        <button class="btn btn-outline-secondary" type="button" id="saveApiKey">
+                            Save
+                        </button>
+                    </div>
+                    <div class="form-text">Your API key is stored locally in your browser.</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-body">
+                <form id="queryForm">
+                    <div class="mb-3">
+                        <label for="database" class="form-label">Select Database</label>
+                        <select class="form-select" id="database" required>
+                            <option value="">Choose a database...</option>
+                            <option value="sqlite:///sales_database.db">Sales Database</option>
+                            <!-- Add more database options here -->
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label for="query" class="form-label">What would you like to know?</label>
+                        <textarea class="form-control" id="query" rows="3" 
+                            placeholder="e.g., Show me total sales by product category for the last month"
+                            required></textarea>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Submit Query</button>
+                </form>
+            </div>
+        </div>
+
+        <div id="loading">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            <p>Processing your query...</p>
+        </div>
+
+        <div id="results" class="result-section">
+            <h3>Results</h3>
+            
+            <div class="card mb-3">
+                <div class="card-header">SQL Query</div>
+                <div class="card-body">
+                    <pre id="sqlQuery" class="bg-light p-3"></pre>
+                </div>
+            </div>
+
+            <div class="card mb-3">
+                <div class="card-header">Summary</div>
+                <div class="card-body">
+                    <p id="summary"></p>
+                </div>
+            </div>
+
+            <div class="card mb-3">
+                <div class="card-header">Visualization</div>
+                <div class="card-body">
+                    <div id="visualization"></div>
+                </div>
+            </div>
+
+            <div class="card mb-3">
+                <div class="card-header">Report</div>
+                <div class="card-body">
+                    <a id="reportLink" href="#" target="_blank" class="btn btn-secondary">View Full Report</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Load saved API key if it exists
+            const savedApiKey = localStorage.getItem('openai_api_key');
+            if (savedApiKey) {
+                document.getElementById('apiKey').value = savedApiKey;
+            }
+
+            // Toggle API key visibility
+            document.getElementById('toggleApiKey').addEventListener('click', function() {
+                const apiKeyInput = document.getElementById('apiKey');
+                const type = apiKeyInput.type === 'password' ? 'text' : 'password';
+                apiKeyInput.type = type;
+                this.innerHTML = type === 'password' ? '<i class="bi bi-eye"></i>' : '<i class="bi bi-eye-slash"></i>';
+            });
+
+            // Save API key
+            document.getElementById('saveApiKey').addEventListener('click', function() {
+                const apiKey = document.getElementById('apiKey').value;
+                if (apiKey) {
+                    localStorage.setItem('openai_api_key', apiKey);
+                    alert('API key saved successfully!');
+                } else {
+                    alert('Please enter an API key');
+                }
+            });
+        });
+
+        document.getElementById('queryForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const apiKey = document.getElementById('apiKey').value;
+            if (!apiKey) {
+                alert('Please enter your OpenAI API key');
+                return;
+            }
+
+            const query = document.getElementById('query').value;
+            const database = document.getElementById('database').value;
+            const loading = document.getElementById('loading');
+            const results = document.getElementById('results');
+            
+            if (!database) {
+                alert('Please select a database');
+                return;
+            }
+            
+            // Show loading, hide results
+            loading.style.display = 'block';
+            results.style.display = 'none';
+            
+            try {
+                const response = await fetch('/query', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        query: query,
+                        db_connection: database,
+                        api_key: apiKey
+                    }),
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                
+                // Update results
+                document.getElementById('sqlQuery').textContent = data.sql_query;
+                document.getElementById('summary').textContent = data.summary;
+                
+                // Update report link
+                const reportLink = document.getElementById('reportLink');
+                reportLink.href = data.report_path;
+                
+                // Handle visualization
+                const vizDiv = document.getElementById('visualization');
+                if (data.visualization.type === 'value') {
+                    // Create value display
+                    vizDiv.innerHTML = `
+                        <div class="text-center">
+                            <h3>${data.visualization.label}</h3>
+                            <h1 class="display-4">${data.visualization.data}</h1>
+                        </div>
+                    `;
+                } else if (data.visualization.type === 'table') {
+                    // Create table visualization
+                    const table = createTable(data.visualization.data, data.visualization.columns);
+                    vizDiv.innerHTML = '';
+                    vizDiv.appendChild(table);
+                } else if (['pie', 'bar', 'line', 'scatter'].includes(data.visualization.type)) {
+                    // Handle all plot types with Plotly
+                    const plotData = JSON.parse(data.visualization.plot);
+                    Plotly.newPlot('visualization', plotData.data, plotData.layout, {
+                        responsive: true,
+                        displayModeBar: true,
+                        displaylogo: false,
+                        modeBarButtonsToRemove: ['lasso2d', 'select2d']
+                    });
+                } else {
+                    // Fallback for unknown visualization types
+                    vizDiv.innerHTML = '<div class="alert alert-warning">Unable to create visualization. Showing raw data:</div>';
+                    const table = createTable(data.visualization.data || [], data.visualization.columns || []);
+                    vizDiv.appendChild(table);
+                }
+                
+                // Show results, hide loading
+                loading.style.display = 'none';
+                results.style.display = 'block';
+                
+            } catch (error) {
+                console.error('Error:', error);
+                alert('An error occurred while processing your query. Please try again.');
+                loading.style.display = 'none';
+            }
+        });
+
+        function createTable(data, columns) {
+            const table = document.createElement('table');
+            table.className = 'table table-striped';
+            
+            // Create header
+            const thead = document.createElement('thead');
+            const headerRow = document.createElement('tr');
+            columns.forEach(column => {
+                const th = document.createElement('th');
+                th.textContent = column;
+                headerRow.appendChild(th);
+            });
+            thead.appendChild(headerRow);
+            table.appendChild(thead);
+            
+            // Create body
+            const tbody = document.createElement('tbody');
+            data.forEach(row => {
+                const tr = document.createElement('tr');
+                columns.forEach(column => {
+                    const td = document.createElement('td');
+                    td.textContent = row[column];
+                    tr.appendChild(td);
+                });
+                tbody.appendChild(tr);
+            });
+            table.appendChild(tbody);
+            
+            return table;
+        }
+    </script>
+
+    <!-- Add Bootstrap Icons -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css">
+</body>
+</html> 

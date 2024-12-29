@@ -13,7 +13,6 @@ ENV/
 
 # Reports directory
 reports/
-*.html
 
 # Database files
 *.db
