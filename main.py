@@ -8,7 +8,7 @@ import pandas as pd
 import plotly.express as px
 import json
 from typing import Optional, Dict, Any
-from openai import OpenAI
+import requests
 from datetime import datetime
 import os
 import base64
@@ -58,16 +58,12 @@ app.add_middleware(
 class QueryRequest(BaseModel):
     query: str
     db_connection: str
-    api_key: str
 
 class AIDBAgent:
-    def __init__(self, openai_api_key: str):
+    def __init__(self):
         logger.info("Initializing AIDBAgent")
         try:
-            self.client = OpenAI(
-                api_key=openai_api_key,
-                base_url="https://api.openai.com/v1"
-            )
+            self.ollama_url = "http://localhost:11434/api/generate"
             self.engine = None
             self.db_schema = None
         except Exception as e:
@@ -98,7 +94,7 @@ class AIDBAgent:
             raise HTTPException(status_code=500, detail=f"Database connection error: {str(e)}")
 
     def generate_sql_query(self, natural_query: str) -> str:
-        """Convert natural language to SQL using OpenAI"""
+        """Convert natural language to SQL using Ollama"""
         try:
             logger.info(f"Generating SQL query for: {natural_query}")
             prompt = f"""
@@ -115,19 +111,21 @@ class AIDBAgent:
             - Return only the raw SQL query without any formatting
             """
             
-            response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You are a SQL query generator for SQLite. Use SQLite-specific date functions and syntax."},
-                    {"role": "user", "content": prompt}
-                ]
-            )
+            response = requests.post(self.ollama_url, json={
+                "model": "llama3.2:3b",
+                "prompt": prompt,
+                "stream": False
+            })
             
-            sql_query = response.choices[0].message.content.strip()
-            sql_query = sql_query.replace('```sql', '').replace('```', '').strip()
+            if response.status_code == 200:
+                sql_query = response.json()['response'].strip()
+                sql_query = sql_query.replace('```sql', '').replace('```', '').strip()
+                
+                logger.info(f"Generated SQL query: {sql_query}")
+                return sql_query
+            else:
+                raise Exception(f"Ollama API error: {response.text}")
             
-            logger.info(f"Generated SQL query: {sql_query}")
-            return sql_query
         except Exception as e:
             logger.error(f"Query generation error: {str(e)}")
             logger.error(traceback.format_exc())
@@ -174,19 +172,17 @@ class AIDBAgent:
             Return ONLY the JSON object, no additional text.
             """
             
-            response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {
-                        "role": "system", 
-                        "content": "You are a data visualization expert. Always return valid JSON objects."
-                    },
-                    {"role": "user", "content": prompt}
-                ]
-            )
+            response = requests.post(self.ollama_url, json={
+                "model": "llama3.2:3b",
+                "prompt": prompt,
+                "stream": False
+            })
             
-            # Get the response content and try to parse it
-            content = response.choices[0].message.content.strip()
+            if response.status_code == 200:
+                content = response.json()['response'].strip()
+            else:
+                raise Exception(f"Ollama API error: {response.text}")
+
             logger.info(f"Raw visualization suggestion: {content}")
             
             try:
@@ -309,15 +305,17 @@ class AIDBAgent:
             Provide a brief, natural language summary of the key insights from this data.
             """
             
-            response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You are a data analyst providing clear, concise summaries."},
-                    {"role": "user", "content": prompt}
-                ]
-            )
+            response = requests.post(self.ollama_url, json={
+                "model": "llama3.2:3b",
+                "prompt": prompt,
+                "stream": False
+            })
             
-            return response.choices[0].message.content.strip()
+            if response.status_code == 200:
+                return response.json()['response'].strip()
+            else:
+                raise Exception(f"Ollama API error: {response.text}")
+                
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Summary generation error: {str(e)}")
 
@@ -372,9 +370,8 @@ async def home(request: Request):
 async def process_query(request: QueryRequest):
     logger.info(f"Received query request: {request.query}")
     try:
-        # Get API key from request
-        api_key = request.api_key
-        ai_agent = AIDBAgent(api_key)
+        # Initialize without API key
+        ai_agent = AIDBAgent()
         
         # Connect to database
         logger.info("Connecting to database...")
