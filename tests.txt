@@ -1,0 +1,7 @@
+draw a pie chart for product name and product total sales money
+
+How many products are sold in each category?
+
+how many products in total?
+
+// The performance of the llama3.2 model is good enough for the query.

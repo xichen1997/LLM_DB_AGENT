@@ -97,29 +97,59 @@ class AIDBAgent:
         """Convert natural language to SQL using Ollama"""
         try:
             logger.info(f"Generating SQL query for: {natural_query}")
-            prompt = f"""
-            Given the following database schema:
-            {json.dumps(self.db_schema, indent=2)}
             
-            Convert this natural language query to SQL using SQLite syntax:
-            "{natural_query}"
+            system_prompt = """You are a SQL expert specialized in converting natural language queries to SQL.
+            Your responses should ONLY contain the SQL query, without any explanations or markdown.
             
-            Important notes:
-            - Use SQLite date functions (strftime, date, etc.)
-            - For "last month", use: "WHERE sale_date >= date('now', 'start of month', '-1 month') AND sale_date < date('now', 'start of month')"
-            - For date calculations, use SQLite's date() and strftime() functions
-            - Return only the raw SQL query without any formatting
+            Follow these rules strictly:
+            1. Always verify table and column names against the provided schema
+            2. Use appropriate JOIN conditions when multiple tables are involved
+            3. Include WHERE clauses to filter data as specified
+            4. Use proper aggregation functions (SUM, AVG, COUNT, etc.) when needed
+            5. Handle date/time operations correctly
+            6. Ensure proper GROUP BY clauses when using aggregations
+            7. Add HAVING clauses when filtering aggregated results
+            8. Use ORDER BY for sorting when relevant
+            9. Limit results when appropriate
+            10. Use appropriate data type conversions if needed
+            
+            If you cannot generate a valid query, respond with "ERROR: " followed by the reason.
             """
-            
+
+            user_prompt = f"""Database Schema:
+            {json.dumps(self.db_schema, indent=2)}
+
+            Natural Language Query: "{natural_query}"
+
+            Requirements:
+            1. Generate a single, executable SQL query
+            2. Only use tables and columns that exist in the schema
+            3. Ensure all table joins are properly specified
+            4. Include appropriate WHERE conditions
+            5. Handle NULL values appropriately
+
+            Generate the SQL query:"""
+
             response = requests.post(self.ollama_url, json={
                 "model": "llama3.2:3b",
-                "prompt": prompt,
-                "stream": False
+                "prompt": f"{system_prompt}\n\n{user_prompt}",
+                "stream": False,
+                "temperature": 0.1  # Lower temperature for more focused responses
             })
             
             if response.status_code == 200:
                 sql_query = response.json()['response'].strip()
+                
+                # Remove any markdown formatting if present
                 sql_query = sql_query.replace('```sql', '').replace('```', '').strip()
+                
+                # Check if the response indicates an error
+                if sql_query.startswith('ERROR:'):
+                    raise Exception(sql_query)
+                
+                # Validate that the query contains basic SQL keywords
+                if not any(keyword in sql_query.upper() for keyword in ['SELECT', 'FROM']):
+                    raise Exception("Generated query does not contain basic SQL syntax")
                 
                 logger.info(f"Generated SQL query: {sql_query}")
                 return sql_query
