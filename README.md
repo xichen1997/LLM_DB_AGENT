@@ -6,27 +6,31 @@ This tool converts natural language to SQL queries, visualizes data, and generat
 
 1. **Install Dependencies:**
 
+   Create a virtual environment and install the dependencies.
    ```bash
-   pip install fastapi uvicorn sqlalchemy pandas plotly openai python-dotenv jinja2
+   python -m venv venv
+   source venv/bin/activate
+   pip install -r requirements.txt
    ```
 
-2. **Set OpenAI API Key:**
 
-   - Create `.env` file
-   - Add your API key:
-     ```bash
-     OPENAI_API_KEY=your-api-key-here
-     ```
-
-3. **Create Demo Database:**
+2. **Create Demo Database:**
 
    ```bash
    python create_database.py
    ```
+   The database created use a seed to make sure the data is consistent.
 
-4. **Start Server:**
+3. **Start Server:**
    ```bash
    uvicorn main:app --reload
+   ```
+
+4. **Run Tests:**
+   The command below will run the tests and generate a report in the tests/logs directory.
+   If everything is working, you should see a PASS for each test.
+   ```bash
+   python -m pytest tests/test_llm_queries.py
    ```
 
 ## Example Queries
