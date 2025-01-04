@@ -30,11 +30,37 @@
 
         <div class="card mb-4">
             <div class="card-header">
-                Ollama Status
+                AI Model Status
             </div>
             <div class="card-body">
-                <div id="ollamaStatus" class="alert">
-                    Checking Ollama connection...
+                <div class="row">
+                    <div class="col-md-6">
+                        <div id="ollamaStatus" class="alert">
+                            Checking Ollama connection...
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div id="openaiStatus" class="alert alert-info">
+                            OpenAI API Available
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-header">
+                Example Queries
+            </div>
+            <div class="card-body">
+                <div class="list-group">
+                    {% for query in example_queries %}
+                    <button type="button" class="list-group-item list-group-item-action"
+                        onclick="setQuery('{{ query.query }}')">
+                        <strong>{{ query.title }}</strong><br>
+                        <small class="text-muted">{{ query.query }}</small>
+                    </button>
+                    {% endfor %}
                 </div>
             </div>
         </div>
@@ -42,6 +68,20 @@
         <div class="card">
             <div class="card-body">
                 <form id="queryForm">
+                    <div class="mb-3">
+                        <label for="model" class="form-label">Select AI Model</label>
+                        <select class="form-select" id="model" required onchange="toggleApiKeyField()">
+                            <option value="">Choose an AI model...</option>
+                            <option value="ollama">Ollama (Local)</option>
+                            <option value="chatgpt">ChatGPT (OpenAI)</option>
+                        </select>
+                    </div>
+                    <div class="mb-3" id="apiKeyField" style="display: none;">
+                        <label for="apiKey" class="form-label">OpenAI API Key</label>
+                        <input type="password" class="form-control" id="apiKey" placeholder="Enter your OpenAI API key">
+                        <div class="form-text">Your API key will be used only for this session and won't be stored.
+                        </div>
+                    </div>
                     <div class="mb-3">
                         <label for="database" class="form-label">Select Database</label>
                         <select class="form-select" id="database" required>
@@ -101,16 +141,34 @@
     </div>
 
     <script>
+        function toggleApiKeyField() {
+            const model = document.getElementById('model').value;
+            const apiKeyField = document.getElementById('apiKeyField');
+            apiKeyField.style.display = model === 'chatgpt' ? 'block' : 'none';
+        }
+
         document.getElementById('queryForm').addEventListener('submit', async (e) => {
             e.preventDefault();
 
             const query = document.getElementById('query').value;
             const database = document.getElementById('database').value;
+            const model = document.getElementById('model').value;
+            const apiKey = document.getElementById('apiKey').value;
             const loading = document.getElementById('loading');
             const results = document.getElementById('results');
 
             if (!database) {
                 alert('Please select a database');
+                return;
+            }
+
+            if (!model) {
+                alert('Please select an AI model');
+                return;
+            }
+
+            if (model === 'chatgpt' && !apiKey) {
+                alert('Please enter your OpenAI API key');
                 return;
             }
 
@@ -126,7 +184,9 @@
                     },
                     body: JSON.stringify({
                         query: query,
-                        db_connection: database
+                        db_connection: database,
+                        model: model,
+                        api_key: apiKey
                     }),
                 });
 
@@ -161,6 +221,7 @@
                     vizDiv.appendChild(table);
                 } else if (['pie', 'bar', 'line', 'scatter'].includes(data.visualization.type)) {
                     // Handle all plot types with Plotly
+                    vizDiv.innerHTML = ''; // Clear previous content
                     const plotData = JSON.parse(data.visualization.plot);
                     Plotly.newPlot('visualization', plotData.data, plotData.layout, {
                         responsive: true,
@@ -217,12 +278,16 @@
             return table;
         }
 
-        // Add Ollama status check
+        // Update Ollama status check
         async function checkOllamaStatus() {
             try {
                 const response = await fetch('http://localhost:11434/api/version');
                 const data = await response.json();
                 const statusDiv = document.getElementById('ollamaStatus');
+
+                function setQuery(query) {
+                    document.getElementById('query').value = query;
+                }
                 if (response.ok) {
                     statusDiv.className = 'alert alert-success';
                     statusDiv.textContent = `Ollama Connected (Version: ${data.version})`;
@@ -241,9 +306,6 @@
         checkOllamaStatus();
         setInterval(checkOllamaStatus, 30000);
     </script>
-
-    <!-- Add Bootstrap Icons -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css">
 </body>
 
 </html>

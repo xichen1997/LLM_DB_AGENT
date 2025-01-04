@@ -4,6 +4,9 @@ from sqlalchemy.orm import sessionmaker
 import datetime
 import random
 
+# Set fixed random seed for reproducibility
+random.seed(42)  # You can use any integer value as the seed
+
 # Create database engine
 engine = create_engine('sqlite:///sales_database.db')
 Base = declarative_base()

@@ -17,6 +17,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import logging
 from logging.handlers import RotatingFileHandler
 import traceback
+from openai import OpenAI
+from enum import Enum
 
 # Set up logging configuration
 logging.basicConfig(level=logging.INFO)
@@ -58,16 +60,68 @@ app.add_middleware(
 class QueryRequest(BaseModel):
     query: str
     db_connection: str
+    model: str  # 'ollama' or 'chatgpt'
+    api_key: Optional[str] = None  # Optional API key for ChatGPT
+
+class LLMProvider(Enum):
+    OLLAMA = "ollama"
+    CHATGPT = "chatgpt"
 
 class AIDBAgent:
-    def __init__(self):
-        logger.info("Initializing AIDBAgent")
+    def __init__(self, model: str = "ollama", api_key: Optional[str] = None):
+        logger.info(f"Initializing AIDBAgent with {model}")
         try:
+            self.model = model.lower()
             self.ollama_url = "http://localhost:11434/api/generate"
+            self.openai_client = OpenAI(api_key=api_key) if api_key else None
             self.engine = None
             self.db_schema = None
+            # Default Ollama parameters
+            self.ollama_params = {
+                'temperature': 0.0,
+                'num_predict': 256,
+                'stop': None
+            }
+            
+            if self.model == "chatgpt" and not api_key:
+                raise ValueError("API key is required for ChatGPT")
+                
         except Exception as e:
             logger.error(f"Error initializing AIDBAgent: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+
+    def _llm_call(self, system_prompt: str, user_prompt: str) -> str:
+        """Unified method to call LLM providers"""
+        try:
+            if self.model == "ollama":
+                response = requests.post(self.ollama_url, json={
+                    "model": "llama3.2:3b",
+                    "prompt": f"{system_prompt}\n\n{user_prompt}",
+                    "stream": False,
+                    **self.ollama_params  # Include temperature and other parameters
+                })
+                
+                if response.status_code == 200:
+                    return response.json()['response'].strip()
+                else:
+                    raise Exception(f"Ollama API error: {response.text}")
+                    
+            elif self.model == "chatgpt":
+                if not self.openai_client:
+                    raise ValueError("OpenAI client not initialized")
+                    
+                response = self.openai_client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ]
+                )
+                return response.choices[0].message.content.strip()
+                
+        except Exception as e:
+            logger.error(f"LLM call error: {str(e)}")
             logger.error(traceback.format_exc())
             raise
 
@@ -94,7 +148,7 @@ class AIDBAgent:
             raise HTTPException(status_code=500, detail=f"Database connection error: {str(e)}")
 
     def generate_sql_query(self, natural_query: str) -> str:
-        """Convert natural language to SQL using Ollama"""
+        """Convert natural language to SQL using selected LLM provider"""
         try:
             logger.info(f"Generating SQL query for: {natural_query}")
             
@@ -130,31 +184,21 @@ class AIDBAgent:
 
             Generate the SQL query:"""
 
-            response = requests.post(self.ollama_url, json={
-                "model": "llama3.2:3b",
-                "prompt": f"{system_prompt}\n\n{user_prompt}",
-                "stream": False,
-                "temperature": 0.1  # Lower temperature for more focused responses
-            })
+            sql_query = self._llm_call(system_prompt, user_prompt)
             
-            if response.status_code == 200:
-                sql_query = response.json()['response'].strip()
-                
-                # Remove any markdown formatting if present
-                sql_query = sql_query.replace('```sql', '').replace('```', '').strip()
-                
-                # Check if the response indicates an error
-                if sql_query.startswith('ERROR:'):
-                    raise Exception(sql_query)
-                
-                # Validate that the query contains basic SQL keywords
-                if not any(keyword in sql_query.upper() for keyword in ['SELECT', 'FROM']):
-                    raise Exception("Generated query does not contain basic SQL syntax")
-                
-                logger.info(f"Generated SQL query: {sql_query}")
-                return sql_query
-            else:
-                raise Exception(f"Ollama API error: {response.text}")
+            # Remove any markdown formatting if present
+            sql_query = sql_query.replace('```sql', '').replace('```', '').strip()
+            
+            # Check if the response indicates an error
+            if sql_query.startswith('ERROR:'):
+                raise Exception(sql_query)
+            
+            # Validate that the query contains basic SQL keywords
+            if not any(keyword in sql_query.upper() for keyword in ['SELECT', 'FROM']):
+                raise Exception("Generated query does not contain basic SQL syntax")
+            
+            logger.info(f"Generated SQL query: {sql_query}")
+            return sql_query
             
         except Exception as e:
             logger.error(f"Query generation error: {str(e)}")
@@ -172,14 +216,21 @@ class AIDBAgent:
         """Generate appropriate visualization based on data"""
         try:
             logger.info(f"Generating visualization for dataframe with columns: {df.columns.tolist()}")
-            prompt = f"""
+            system_prompt = """You are a data visualization expert. Your task is to analyze the data and determine the most appropriate visualization type.
+            Be explicit about choosing table visualization when the data needs detailed examination.
+            The visualization type should comply with the users query.
+            """
+            
+            user_prompt = f"""
             Given this data summary:
             Columns: {df.columns.tolist()}
             Data types: {df.dtypes.to_dict()}
             Number of rows: {len(df)}
             Query: "{query}"
+
             
-            Return a JSON object with the following structure for visualization:
+            Return a JSON object with the following structure for visualization, without any markdown or code blocks:
+            Note not all fields are required for all visualization types.
             {{
                 "type": "value" | "line" | "bar" | "scatter" | "pie" | "table",
                 "reason": "explanation for choosing this visualization",
@@ -198,21 +249,14 @@ class AIDBAgent:
             4. For distributions: use 'scatter' type
             5. For parts of a whole: use 'pie' type
             6. For detailed data or if unsure: use 'table' type
-
+            
+            If the user query mentions a specific type, then the visualization type should be that type.
             Return ONLY the JSON object, no additional text.
+            without any markdown or code blocks.
             """
             
-            response = requests.post(self.ollama_url, json={
-                "model": "llama3.2:3b",
-                "prompt": prompt,
-                "stream": False
-            })
+            content = self._llm_call(system_prompt, user_prompt)
             
-            if response.status_code == 200:
-                content = response.json()['response'].strip()
-            else:
-                raise Exception(f"Ollama API error: {response.text}")
-
             logger.info(f"Raw visualization suggestion: {content}")
             
             try:
@@ -325,7 +369,9 @@ class AIDBAgent:
     def generate_summary(self, df: pd.DataFrame, query: str) -> str:
         """Generate natural language summary of the results"""
         try:
-            prompt = f"""
+            system_prompt = """You are a data analyst. Provide clear and concise summaries of data analysis results."""
+            
+            user_prompt = f"""
             Given this data summary:
             Number of rows: {len(df)}
             Columns: {df.columns.tolist()}
@@ -335,16 +381,7 @@ class AIDBAgent:
             Provide a brief, natural language summary of the key insights from this data.
             """
             
-            response = requests.post(self.ollama_url, json={
-                "model": "llama3.2:3b",
-                "prompt": prompt,
-                "stream": False
-            })
-            
-            if response.status_code == 200:
-                return response.json()['response'].strip()
-            else:
-                raise Exception(f"Ollama API error: {response.text}")
+            return self._llm_call(system_prompt, user_prompt)
                 
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Summary generation error: {str(e)}")
@@ -400,8 +437,11 @@ async def home(request: Request):
 async def process_query(request: QueryRequest):
     logger.info(f"Received query request: {request.query}")
     try:
-        # Initialize without API key
-        ai_agent = AIDBAgent()
+        # Initialize with specified model and API key
+        ai_agent = AIDBAgent(
+            model=request.model,
+            api_key=request.api_key
+        )
         
         # Connect to database
         logger.info("Connecting to database...")
