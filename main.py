@@ -19,6 +19,12 @@ from logging.handlers import RotatingFileHandler
 import traceback
 from openai import OpenAI
 from enum import Enum
+import numpy as np
+import random
+
+# Set manual seeds for reproducibility
+RANDOM_SEED = 42
+np.random.seed(RANDOM_SEED)
 
 # Set up logging configuration
 logging.basicConfig(level=logging.INFO)
@@ -76,12 +82,6 @@ class AIDBAgent:
             self.openai_client = OpenAI(api_key=api_key) if api_key else None
             self.engine = None
             self.db_schema = None
-            # Default Ollama parameters
-            self.ollama_params = {
-                'temperature': 0.0,
-                'num_predict': 256,
-                'stop': None
-            }
             
             if self.model == "chatgpt" and not api_key:
                 raise ValueError("API key is required for ChatGPT")
@@ -95,12 +95,21 @@ class AIDBAgent:
         """Unified method to call LLM providers"""
         try:
             if self.model == "ollama":
-                response = requests.post(self.ollama_url, json={
+                # Combine system and user prompts
+                full_prompt = f"{system_prompt}\n\n{user_prompt}"
+                
+                # Prepare Ollama API parameters
+                ollama_request = {
                     "model": "llama3.2:3b",
-                    "prompt": f"{system_prompt}\n\n{user_prompt}",
+                    "prompt": full_prompt,
                     "stream": False,
-                    **self.ollama_params  # Include temperature and other parameters
-                })
+                    "temperature": 0.0,
+                    # "stop": [";", "\n\n"],  # Add stop tokens
+                    # "context": [],  # Reset context for each request
+                    "seed": 42  # Add this to fix the random seed
+                }
+                
+                response = requests.post(self.ollama_url, json=ollama_request)
                 
                 if response.status_code == 200:
                     return response.json()['response'].strip()
@@ -112,11 +121,13 @@ class AIDBAgent:
                     raise ValueError("OpenAI client not initialized")
                     
                 response = self.openai_client.chat.completions.create(
-                    model="gpt-4o",
+                    model="gpt-4o",  # Fixed model name typo
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
-                    ]
+                    ],
+                    temperature=0.0,  # Set temperature to 0 for deterministic output
+                    seed=42,          # Set a fixed seed for reproducibility
                 )
                 return response.choices[0].message.content.strip()
                 
@@ -172,7 +183,7 @@ class AIDBAgent:
 
             user_prompt = f"""Database Schema:
             {json.dumps(self.db_schema, indent=2)}
-
+            
             Natural Language Query: "{natural_query}"
 
             Requirements:
@@ -230,17 +241,17 @@ class AIDBAgent:
 
             
             Return a JSON object with the following structure for visualization, without any markdown or code blocks:
-            Note not all fields are required for all visualization types.
             {{
                 "type": "value" | "line" | "bar" | "scatter" | "pie" | "table",
                 "reason": "explanation for choosing this visualization",
                 "value_column": "column_name",  // for 'value' type only
-                "values": "column_name",        // for pie chart values
-                "names": "column_name",         // for pie chart categories
-                "x_column": "column_name",      // for line/bar/scatter plots
-                "y_column": "column_name",      // for line/bar/scatter plots
+                "names": "column_name",  // for 'pie' type only
+                "values": "column_name",  // for 'pie' type only
+                "x_column": "column_name",      // for pie/line/bar/scatter plots
+                "y_column": "column_name",      // for pie/line/bar/scatter plots
                 "title": "chart title"          // optional, for all chart types
             }}
+            
 
             Choose visualization type based on these rules:
             1. For single aggregated values: use 'value' type
@@ -249,6 +260,7 @@ class AIDBAgent:
             4. For distributions: use 'scatter' type
             5. For parts of a whole: use 'pie' type
             6. For detailed data or if unsure: use 'table' type
+            7. Dont add limit in the query until the user asks for it.
             
             If the user query mentions a specific type, then the visualization type should be that type.
             Return ONLY the JSON object, no additional text.
@@ -299,8 +311,9 @@ class AIDBAgent:
                         values_col = viz_suggestion.get('values', viz_suggestion.get('y_column'))
                         names_col = viz_suggestion.get('names', viz_suggestion.get('x_column'))
                         
-                        if not values_col or not names_col or values_col not in df.columns or names_col not in df.columns:
-                            raise KeyError("Missing or invalid columns for pie chart")
+                        # Ensure values are numeric
+                        if not np.issubdtype(df[values_col].dtype, np.number):
+                            raise ValueError(f"Values column '{values_col}' must be numeric")
                         
                         # Aggregate data for pie chart
                         df_agg = df.groupby(names_col)[values_col].sum().reset_index()
@@ -347,6 +360,8 @@ class AIDBAgent:
                 except Exception as e:
                     logger.error(f"Error creating visualization: {str(e)}")
                     logger.error(traceback.format_exc())
+                    logger.error(f"DataFrame at error: {df}")
+                    logger.error(f"Visualization suggestion at error: {viz_suggestion}")
                     # Fallback to table view
                     return {
                         'type': 'table',

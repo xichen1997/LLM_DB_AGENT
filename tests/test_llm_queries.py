@@ -36,11 +36,12 @@ def ai_agent():
     """Create an AIDBAgent instance for testing with controlled parameters"""
     agent = AIDBAgent(model=TEST_CONFIG['model'])
     # Set Ollama parameters for deterministic output
-    # agent.ollama_params = {
-    #     'temperature': TEST_CONFIG['temperature'],
-    #     'num_predict': 256,  # Reasonable limit for SQL queries
-    #     'stop': [';', '\n\n']  # Stop at query end or double newline
-    # }
+    agent.ollama_params = {
+        'temperature': TEST_CONFIG['temperature'],
+        'num_predict': 256,  # Reasonable limit for SQL queries
+        'num_ctx': 4096,     # Extended context window
+        'stop': [';', '\n\n']  # Stop at query end or double newline
+    }
     agent.connect_to_db(TEST_CONFIG['database_url'])
     return agent
 
@@ -50,7 +51,7 @@ def test_product_sales_pie_chart(ai_agent):
     with open('tests/product_and_sales_standard.json', 'r') as f:
         standard = json.load(f)
     
-    query = "A pie chart of products and their subtotal sales(subtotal revenue). Make sure you understand the schema in each table."
+    query = "A pie chart of products and their subtotal sales."
     
     # Generate and execute SQL query
     sql_query = ai_agent.generate_sql_query(query)
