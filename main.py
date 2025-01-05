@@ -451,54 +451,77 @@ async def home(request: Request):
 @app.post("/query")
 async def process_query(request: QueryRequest):
     logger.info(f"Received query request: {request.query}")
-    try:
-        # Initialize with specified model and API key
-        ai_agent = AIDBAgent(
-            model=request.model,
-            api_key=request.api_key
-        )
-        
-        # Connect to database
-        logger.info("Connecting to database...")
-        ai_agent.connect_to_db(request.db_connection)
-        
-        # Generate and execute SQL query
-        logger.info("Generating SQL query...")
-        sql_query = ai_agent.generate_sql_query(request.query)
-        logger.info("Executing SQL query...")
-        results_df = ai_agent.execute_query(sql_query)
-        
-        # Generate visualization and summary
-        logger.info("Generating visualization...")
-        visualization = ai_agent.generate_visualization(results_df, request.query)
-        logger.info("Generating summary...")
-        summary = ai_agent.generate_summary(results_df, request.query)
-        
-        # Save report
-        logger.info("Saving report...")
-        report_path = ai_agent.save_report(
-            query=request.query,
-            sql_query=sql_query,
-            df=results_df,
-            visualization=visualization,
-            summary=summary
-        )
-        
-        logger.info("Request processed successfully")
-        return JSONResponse(content={
-            "sql_query": sql_query,
-            "visualization": visualization,
-            "summary": summary,
-            "report_path": report_path
-        })
-        
-    except Exception as e:
-        logger.error(f"Error processing query: {str(e)}")
-        logger.error(traceback.format_exc())
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": str(e),
-                "details": traceback.format_exc()
-            }
-        )
+    MAX_RETRIES = 3
+    last_error = None
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            logger.info(f"Processing attempt {attempt + 1}/{MAX_RETRIES}")
+            
+            # Initialize with specified model and API key
+            ai_agent = AIDBAgent(
+                model=request.model,
+                api_key=request.api_key
+            )
+            
+            # Connect to database
+            logger.info("Connecting to database...")
+            ai_agent.connect_to_db(request.db_connection)
+            
+            # Generate and execute SQL query
+            logger.info(f"Attempt {attempt + 1}: Generating SQL query...")
+            sql_query = ai_agent.generate_sql_query(request.query)
+            logger.info(f"Attempt {attempt + 1}: Executing SQL query...")
+            results_df = ai_agent.execute_query(sql_query)
+            
+            # Generate visualization and summary
+            logger.info(f"Attempt {attempt + 1}: Generating visualization...")
+            visualization = ai_agent.generate_visualization(results_df, request.query)
+            
+            # If we get here without errors, we can proceed with summary and report
+            logger.info(f"Attempt {attempt + 1}: Generating summary...")
+            summary = ai_agent.generate_summary(results_df, request.query)
+            
+            # Save report
+            logger.info(f"Attempt {attempt + 1}: Saving report...")
+            report_path = ai_agent.save_report(
+                query=request.query,
+                sql_query=sql_query,
+                df=results_df,
+                visualization=visualization,
+                summary=summary
+            )
+            
+            logger.info(f"Request processed successfully on attempt {attempt + 1}")
+            return JSONResponse(content={
+                "sql_query": sql_query,
+                "visualization": visualization,
+                "summary": summary,
+                "report_path": report_path,
+                "attempts": attempt + 1
+            })
+            
+        except Exception as e:
+            last_error = e
+            logger.error(f"Error on attempt {attempt + 1}: {str(e)}")
+            logger.error(traceback.format_exc())
+            
+            # Log specific error information for debugging
+            logger.error(f"Error details for attempt {attempt + 1}:")
+            logger.error(f"Error type: {type(e).__name__}")
+            logger.error(f"Error message: {str(e)}")
+            
+            if attempt < MAX_RETRIES - 1:
+                logger.info(f"Retrying... ({attempt + 2}/{MAX_RETRIES})")
+                continue
+    
+    # If we get here, all retries failed
+    logger.error(f"All {MAX_RETRIES} attempts failed")
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": str(last_error),
+            "details": traceback.format_exc(),
+            "attempts": MAX_RETRIES
+        }
+    )
