@@ -20,7 +20,7 @@ load_dotenv()
 
 # Get configuration from environment variables
 OLLAMA_MODEL = os.getenv('OLLAMA_MODEL', 'llama3.2:3b')
-DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///../sales_database.db')
+DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///demo.db')
 
 # Test configuration
 TEST_CONFIG = {

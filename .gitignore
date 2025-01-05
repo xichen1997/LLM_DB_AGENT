@@ -13,9 +13,11 @@ ENV/
 
 # Reports directory
 reports/
+tests/logs/
 
 # Database files
 *.db
+!tests/demo.db
 *.sqlite
 *.sqlite3
 *.sql
