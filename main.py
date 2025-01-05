@@ -521,6 +521,38 @@ class TaskManager:
             }
         )
 
+# Example queries for the UI
+EXAMPLE_QUERIES = [
+    {
+        "title": "Product Sales Distribution",
+        "query": "A pie chart of products and their subtotal sales."
+    },
+    {
+        "title": "Total Product Count",
+        "query": "How many kind of products in total?"
+    },
+    {
+        "title": "Top 5 Products by Revenue",
+        "query": "What are the top 5 selling products by total revenue?"
+    },
+    {
+        "title": "Sales by Category",
+        "query": "What is the total sales for each product category?"
+    },
+    {
+        "title": "High Value Products",
+        "query": "Which products have sales over $10,000?"
+    },
+    {
+        "title": "Monthly Sales Trends",
+        "query": "Show monthly sales trends for 2024"
+    },
+    {
+        "title": "Category Comparison",
+        "query": "Compare sales between different product categories"
+    }
+]
+
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     return templates.TemplateResponse(

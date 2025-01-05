@@ -7,8 +7,8 @@ This tool converts natural language to SQL queries, visualizes data, and generat
 
 0. **Install Ollama**
 
-Please refer to the page:
-https://ollama.com/download
+   Please refer to the page:
+   https://ollama.com/download
 
 1. **Install Dependencies:**
 
@@ -40,6 +40,14 @@ https://ollama.com/download
    ```
 
 ## Example Queries
+
+0. **Try the UI**
+
+   Open the UI in your browser: http://localhost:8000
+   You can click the example queries to add the query to the input field and then click the "submit query" button to see the result.
+
+   It's recommended to use chatGPT to generate the query. which will generate more accurate queries.
+   
 
 1. **Using curl:**
 
