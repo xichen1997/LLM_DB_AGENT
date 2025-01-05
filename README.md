@@ -2,7 +2,13 @@
 
 This tool converts natural language to SQL queries, visualizes data, and generates reports.
 
+
 ## Setup Instructions
+
+0. **Install Ollama**
+
+Please refer to the page:
+https://ollama.com/download
 
 1. **Install Dependencies:**
 
